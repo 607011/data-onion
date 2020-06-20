@@ -1,6 +1,24 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+'''
+Solver for Tom's Data Onion (https://www.tomdalling.com/toms-data-onion/)
+Copyright © 2020 Oliver Lau <oliver@ersatzworld.net>
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+This program is distributed in the hope that it will be useful, but
+WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program. If not, see https://www.gnu.org/licenses/.
+'''
+
 import sys
 from lxml import html
 import requests
@@ -24,14 +42,6 @@ def get_payload_of(data: str) -> bytes:
     raise ValueError('no payload found')
   a85 = match.groups()[0]
   return base64.a85decode(a85)
-
-def popcount(b: np.uint8) -> np.uint8:
-  b = b - ((b >> 1) & 0x55)
-  b = (b & 0x33) + ((b >> 2) & 0x33)
-  return (((b + (b >> 4)) & 0x0f) * 0x01)
-
-def is_parity_ok(b: np.uint8) -> np.uint8:
-  return popcount(b) % 2 == 0
 
 def peel(onion_filename=None):
   # get onion from webpage or file
@@ -58,6 +68,14 @@ def peel(onion_filename=None):
   layer2 = data.tostring().decode('utf-8')
   data = get_payload_of(layer2)
   data = np.frombuffer(data, dtype=np.uint8)
+
+  def popcount(b: np.uint8) -> np.uint8:
+    b = b - ((b >> 1) & 0x55)
+    b = (b & 0x33) + ((b >> 2) & 0x33)
+    return (((b + (b >> 4)) & 0x0f) * 0x01)
+
+  def is_parity_ok(b: np.uint8) -> np.uint8:
+    return popcount(b) % 2 == 0
 
   filtered = data[is_parity_ok(data)]
   merged = np.empty(0, dtype=np.uint8)
