@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
+import sys
+from lxml import html
+import requests
 import base64
 import numpy as np
 import re
 import struct
 from Crypto.Cipher import AES
-
 import const
+from aes_unwrap_key import aes_unwrap_key
 
 const.ip_fields = ['v_ihl', 'tos', 'total_length', 'id', 'flags_fragment_offset', 'ttl', 'protocol', 'header_checksum', 'source_address', 'destination_address']
 const.udp_fields = ['source_port', 'destination_port', 'length', 'checksum']
@@ -18,7 +21,7 @@ const.ONEBYTE = struct.Struct('B')
 def get_payload_of(data: str) -> bytes:
   match = re.search(r'<~(.+)~>', data, flags=re.M | re.S)
   if match is None:
-    raise 'no payload found'
+    raise ValueError('no payload found')
   a85 = match.groups()[0]
   return base64.a85decode(a85)
 
@@ -30,17 +33,20 @@ def popcount(b: np.uint8) -> np.uint8:
 def is_parity_ok(b: np.uint8) -> np.uint8:
   return popcount(b) % 2 == 0
 
-def to_bit_sequence(b: [np.uint8]) -> str:
-  return ' '.join([bin(x)[2:].zfill(8) for x in b])
-
-def main():
-  f = open('solutions/layer0.txt', mode='r')
-  layer0 = f.read()
-  f.close()
-
+def main(onion_filename=None):
+  # get onion from webpage or file
+  if onion_filename is not None:
+    f = open(onion_filename, mode='r')
+    layer0 = f.read()
+    f.close()
+  else:
+    page = requests.get('https://www.tomdalling.com/toms-data-onion/')
+    tree = html.fromstring(page.content)
+    layer0 = tree.xpath('//pre/text()')[0]
   data = get_payload_of(layer0)
-  layer1 = data.decode('utf-8')
 
+  # first layer
+  layer1 = data.decode('utf-8')
   data = get_payload_of(layer1)
   data = np.frombuffer(data, dtype=np.uint8)
 
@@ -49,6 +55,7 @@ def main():
   msb = np.left_shift(xored, 7)
   data = np.bitwise_or(shifted, msb)
  
+  # second layer
   layer2 = data.tostring().decode('utf-8')
   data = get_payload_of(layer2)
   data = np.frombuffer(data, dtype=np.uint8)
@@ -67,6 +74,7 @@ def main():
     b[6] = (d[6] & 0b00000010) << 6 | ((d[7] & 0b11111110) >> 1)
     merged = np.append(merged, b)
 
+  # third layer
   layer3 = merged.tostring().decode('utf-8')
   data = get_payload_of(layer3)
   encrypted = np.frombuffer(data, dtype=np.uint8)
@@ -114,6 +122,7 @@ def main():
     chunk = np.bitwise_xor(encrypted[i:i+len(key)], key)
     decrypted = np.append(decrypted, chunk)
 
+  # fourth layer
   layer4 = np.vectorize(lambda x: x if x < 128 else ord('?'))(decrypted).tostring().decode('ascii')
   # print(layer4)
 
@@ -131,11 +140,11 @@ def main():
     checksum = ones_complement_sum_uint16(ip_header)
     return checksum == 0xffff
 
-  def udp_checksum(udp_packet: bytes, ip_src: bytes, ip_dst: bytes, ip_proto: bytes, udp_length: bytes) -> int:
-    assert(len(ip_src) == 4)
-    assert(len(ip_dst) == 4)
-    assert(len(ip_proto) == 1 and ip_proto == b'\x11')
-    assert(len(udp_length) == 2)
+  def udp_checksum(udp_packet: bytes, ip_header: bytes) -> int:
+    ip_src = ip_header_bytes[12:16]
+    ip_dst = ip_header_bytes[16:20]
+    ip_proto = ip_header_bytes[9:10]
+    udp_length = ip_header_bytes[2:4]
     pseudo_header = ip_src + ip_dst + b'\x00' + ip_proto + udp_length
     udp_packet_padded = udp_packet if len(udp_packet) % 2 == 0 else udp_packet + b'\x00'
     assert(len(udp_packet_padded) % 2 == 0)
@@ -143,8 +152,8 @@ def main():
     checksum = ones_complement_sum_uint16(buffer)
     return checksum - 20
 
-  def udp_checksum_ok(udp_packet: bytes, ip_src: bytes, ip_dst: bytes, ip_proto: bytes, udp_length: bytes) -> bool:
-    return udp_checksum(udp_packet, ip_src, ip_dst, ip_proto, udp_length) == 0
+  def udp_checksum_ok(udp_packet: bytes, ip_header: bytes) -> bool:
+    return udp_checksum(udp_packet, ip_header) == 0
 
   def parsed_ip_header(buffer: bytes) -> dict:
     ipv4_hdr = const.IPHEADER.unpack(buffer)
@@ -173,10 +182,11 @@ def main():
       and ip_header['source_address'] == required_src \
         and ip_header['destination_address'] == required_dst \
           and udp_header['destination_port'] == required_dst_port \
-            and udp_checksum_ok(udp_packet, ip_header_bytes[12:16], ip_header_bytes[16:20], ip_header_bytes[9:10], ip_header_bytes[2:4]):
+            and udp_checksum_ok(udp_packet, ip_header_bytes):
       layer5 += udp_packet_data
     idx += ip_header['total_length']
   
+  # fifth layer
   layer5 = layer5.decode('utf-8')
   # print(layer5)
 
@@ -186,34 +196,16 @@ def main():
   wrapped_key = data[40:80]
   iv = data[80:96]
   encrypted = data[96:]
-
-  def aes_unwrap_key_and_iv(kek, wrapped):
-    assert(len(wrapped) % 8 == 0)
-    n = len(wrapped) // 8 - 1
-    QUAD = struct.Struct('>Q')
-    # NOTE: R[0] is never accessed, left in for consistency with RFC indices
-    R = [None]+[wrapped[i*8:i*8+8] for i in range(1, n+1)]
-    A = QUAD.unpack(wrapped[:8])[0]
-    decrypt = AES.new(kek, AES.MODE_ECB).decrypt
-    for j in range(5,-1,-1):
-      for i in range(n, 0, -1):
-        ciphertext = QUAD.pack(A^(n*j+i)) + R[i]
-        B = decrypt(ciphertext)
-        A = QUAD.unpack(B[:8])[0]
-        R[i] = B[8:]
-    return b''.join(R[1:]), QUAD.pack(A)
-
-  def aes_unwrap_key(kek: bytes, wrapped: bytes, iv: bytes) -> ():
-    (key, key_iv) = aes_unwrap_key_and_iv(kek, wrapped)
-    if key_iv != iv:
-      raise ValueError('IV and key IV not identical')
-    return (key, key_iv)
-
   (key, _) = aes_unwrap_key(kek, wrapped_key, iv_wrapped_key)
   cipher = AES.new(key, AES.MODE_CBC, iv=iv)
   plaintext = cipher.decrypt(encrypted)
-  print(plaintext.decode('utf-8'))  # WOOT! :-)
+
+  # WOOT! :-)
+  print(plaintext.decode('utf-8'))
 
 
 if __name__ == '__main__':
-  main()
+  if len(sys.argv) == 2:
+    main(sys.argv[1])
+  else:
+    main()

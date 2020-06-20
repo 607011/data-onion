@@ -10,6 +10,8 @@ pylint = "*"
 numpy = "*"
 pycryptodome = "*"
 pylint = "*"
+lxml = "*"
+requests = "*"
 
 [requires]
 python_version = "3.7"
