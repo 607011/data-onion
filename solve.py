@@ -33,12 +33,11 @@ def popcount(b: np.uint8) -> np.uint8:
 def is_parity_ok(b: np.uint8) -> np.uint8:
   return popcount(b) % 2 == 0
 
-def main(onion_filename=None):
+def peel(onion_filename=None):
   # get onion from webpage or file
   if onion_filename is not None:
-    f = open(onion_filename, mode='r')
-    layer0 = f.read()
-    f.close()
+    with open(onion_filename, mode='r') as f:
+      layer0 = f.read()
   else:
     page = requests.get('https://www.tomdalling.com/toms-data-onion/')
     tree = html.fromstring(page.content)
@@ -79,6 +78,7 @@ def main(onion_filename=None):
   data = get_payload_of(layer3)
   encrypted = np.frombuffer(data, dtype=np.uint8)
 
+  # launch known plaintext attack
   plaintext_start = np.frombuffer(b'==[ Layer 4/5: ', dtype=np.uint8)
   plaintext_end = np.frombuffer(b'~>\n', dtype=np.uint8)
 
@@ -132,7 +132,7 @@ def main(onion_filename=None):
     assert(len(buffer) % 2 == 0)
     values = struct.unpack(f'!{len(buffer)//2}H', buffer)
     total = sum(values)
-    carry = (total & 0xffff0000) >> 16
+    carry = total >> 16
     return (total & 0xffff) + carry
 
   def ip_header_checksum_ok(ip_header: bytes) -> bool:
@@ -148,8 +148,7 @@ def main(onion_filename=None):
     pseudo_header = ip_src + ip_dst + b'\x00' + ip_proto + udp_length
     udp_packet_padded = udp_packet if len(udp_packet) % 2 == 0 else udp_packet + b'\x00'
     assert(len(udp_packet_padded) % 2 == 0)
-    buffer = pseudo_header + udp_packet_padded
-    checksum = ones_complement_sum_uint16(buffer)
+    checksum = ones_complement_sum_uint16(pseudo_header + udp_packet_padded)
     return checksum - 20
 
   def udp_checksum_ok(udp_packet: bytes, ip_header: bytes) -> bool:
@@ -163,9 +162,9 @@ def main(onion_filename=None):
     udp_hdr = const.UDPHEADER.unpack(buffer)
     return dict(zip(const.udp_fields, udp_hdr))
 
-  required_src = 0x0a01010a  # 10.1.1.10
-  required_dst = 0x0a0101c8  # 10.1.1.200
-  required_dst_port = 42069
+  const.required_src = 0x0a01010a  # 10.1.1.10
+  const.required_dst = 0x0a0101c8  # 10.1.1.200
+  const.required_dst_port = 42069
   layer5 = b''
   idx = 0
   while idx < len(data):
@@ -173,15 +172,14 @@ def main(onion_filename=None):
     ihl = 4 * (v_ihl & 0x0f)
     assert(ihl == 20)
     ip_header_bytes = data[idx:idx+ihl]
-    assert(len(ip_header_bytes) == 20)
     ip_header = parsed_ip_header(ip_header_bytes)
     udp_header = parsed_udp_header(data[idx+ihl:idx+ihl+8])
     udp_packet = data[idx+ihl:idx+ihl+udp_header['length']]
     udp_packet_data = udp_packet[8:]
     if ip_header_checksum_ok(ip_header_bytes) \
-      and ip_header['source_address'] == required_src \
-        and ip_header['destination_address'] == required_dst \
-          and udp_header['destination_port'] == required_dst_port \
+      and ip_header['source_address'] == const.required_src \
+        and ip_header['destination_address'] == const.required_dst \
+          and udp_header['destination_port'] == const.required_dst_port \
             and udp_checksum_ok(udp_packet, ip_header_bytes):
       layer5 += udp_packet_data
     idx += ip_header['total_length']
@@ -206,6 +204,6 @@ def main(onion_filename=None):
 
 if __name__ == '__main__':
   if len(sys.argv) == 2:
-    main(sys.argv[1])
+    peel(sys.argv[1])
   else:
-    main()
+    peel()
